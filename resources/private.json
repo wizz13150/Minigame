@@ -1,0 +1,1 @@
+{"default_steps": 20, "default_guidance_scale": 7.0, "default_strength": 0.75, "default_strength_highres_fix": 0.6, "sampler": "DPM++ 2M Karras", "negative_prompt": "", "max_steps": 100, "default_count": 1, "max_count": 16, "clip_skip": 1, "data_model": "Default", "priority": 3, "max_compute": 6.0, "max_compute_batch": 16.0, "max_compute_queue": 16.0}
