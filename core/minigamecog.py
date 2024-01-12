@@ -4,6 +4,7 @@ import base64
 import contextlib
 import discord
 import io
+import re
 import random
 import requests
 import time
@@ -24,6 +25,15 @@ from core import settings
 from core import viewhandler
 
 
+class LeaderboardView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+
+    @discord.ui.button(label="Delete", emoji="❌")
+    async def delete_leaderboard(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await interaction.message.delete()
+
+
 class Minigame:
     def __init__(self, host: discord.User, guild: discord.Guild):
         self.host = host
@@ -39,7 +49,7 @@ class Minigame:
         self.prompt_adventure: str = None
         self.model_name: str = None
         self.data_model: str = None
-        self.adventure: bool = True
+        self.adventure: bool = False
         self.game_iteration: int = 0
         self.batch: int = 2
         self.images_base64: list[str] = []
@@ -53,11 +63,8 @@ class Minigame:
     def update_leaderboard(username, win=False, command_used=False, give_up=False):
         leaderboard_file = 'resources/leaderboard.csv'
         user_found = False
-
-        # Initialiser le tableau leaderboard_data
         leaderboard_data = []
 
-        # Lire le fichier leaderboard et mettre à jour les données de l'utilisateur
         if os.path.exists(leaderboard_file):
             with open(leaderboard_file, mode='r', newline='', encoding='utf-8') as file:
                 reader = csv.reader(file)
@@ -67,18 +74,16 @@ class Minigame:
                 if row[0] == username:
                     user_found = True
                     if win:
-                        row[1] = str(int(row[1]) + 1)  # Incrémentation du nombre de victoires
+                        row[1] = str(int(row[1]) + 1)
                     if command_used:
-                        row[2] = str(int(row[2]) + 1)  # Incrémentation du nombre de commandes utilisées
+                        row[2] = str(int(row[2]) + 1)
                     if give_up:
-                        row[3] = str(int(row[3]) + 1)  # Incrémentation du nombre de "Give up"
+                        row[3] = str(int(row[3]) + 1)
 
-        # Si l'utilisateur n'est pas trouvé, ajoutez-le avec les valeurs initiales
         if not user_found:
             initial_values = ['1' if condition else '0' for condition in (win, command_used, give_up)]
             leaderboard_data.append([username, *initial_values])
 
-        # Écrire les données mises à jour dans le fichier
         with open(leaderboard_file, mode='w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
             writer.writerows(leaderboard_data)
@@ -87,7 +92,7 @@ class Minigame:
         if self.running == True:
             return
         
-        # Mise à jour du leaderboard si le jeu démarre
+        # update leaderboard
         username = self.host.name
         self.update_leaderboard(username, command_used=True)
         
@@ -127,7 +132,10 @@ class Minigame:
                 content = f'<@{user.id}> has guessed the answer! The answer was ``{self.prompt}``.\n'
                 if self.adventure and self.prompt != self.prompt_adventure: content += f'The full prompt was ``{self.prompt_adventure}``.\n'
                 content += f'It took ``{self.guess_count}`` guesses and ``{self.image_count}`` images to get this answer.\nPress 🖋️ or 🖼️ to continue the minigame.'
+
+                # Update the Leaderboard
                 self.update_leaderboard(str(user.name), win=True)
+
                 await self.stop()
             elif similarity > 0.8:
                 content = f'<@{user.id}> tried ``{guess}``. This is really close.'
@@ -157,10 +165,9 @@ class Minigame:
     async def next_image_variation(self, ctx: discord.ApplicationContext | discord.Interaction, prompt: str = None):
         loop = asyncio.get_running_loop()
         user = utility.get_user(ctx)
-        guild = utility.get_guild(ctx)
         content = None
         ephemeral = False
-        print(f'Minigame Request -- {user.name} -- {self.guild}')
+        print(f'Minigame Request -- {user.name}')
 
         try:
             # calculate total cost of queued items and reject if there is too expensive
@@ -185,6 +192,10 @@ class Minigame:
                 if prompt == None:
                     generate_random_prompt = True # user did not input prompt, generate random prompt
 
+                # update leaderboards
+                username = user.name
+                self.update_leaderboard(username, command_used=True)
+
             # generate random prompt if one isn't set
             if not self.prompt:
                 generate_random_prompt = True
@@ -193,7 +204,7 @@ class Minigame:
             if generate_random_prompt:
                 prompt = self.sanatize(prompt)
                 self.prompt = await loop.run_in_executor(None, self.get_random_prompt)
-                self.reveal_prompt = True
+                self.reveal_prompt = False
             elif prompt:
                 self.prompt = self.sanatize(prompt)
                 self.reveal_prompt = True
@@ -203,28 +214,33 @@ class Minigame:
                 self.prompt_adventure = self.prompt
                 try:
                     query = quote(self.prompt.strip())
+                    url = f'https://lexica.art/api/v1/search?q={query}'
+
                     def get_request():
                         try:
-                            return requests.get(f'https://lexica.art/api/v1/search?q={query}', timeout=5)
+                            return requests.get(url, timeout=5)
                         except Exception as e:
                             return e
 
                     response = await loop.run_in_executor(None, get_request)
-                    if type(response) is not requests.Response:
-                        raise response
-
                     images = response.json()['images']
 
-                    # use random result
                     # find valid results containing the prompt
                     valid_results: list[str] = []
+                    prompt_lower = self.prompt.lower()
                     for image in images:
-                        if self.prompt in image['prompt']:
+                        image_prompt_lower = image['prompt'].lower()
+                        if prompt_lower in image_prompt_lower.split():
                             valid_results.append(image['prompt'])
+
+                    # Log
+                    if not valid_results:
+                        print(f'No result found on Lexica for: {self.prompt}')
 
                     # pick a random result out of the valid results
                     if valid_results:
-                        self.prompt_adventure = f'({self.prompt}), ' + self.sanatize(valid_results[random.randrange(0, len(valid_results))])
+                        self.prompt_adventure = f'{self.prompt}, ' + self.sanatize(valid_results[random.randrange(0, len(valid_results))])
+
                 except Exception as e:
                     print(f'Dream rejected: Random prompt query failed.\n{e}\n{traceback.print_exc()}')
                     content = f'<@{user.id}> Random prompt query failed.'
@@ -239,9 +255,9 @@ class Minigame:
             ephemeral = False
 
             if self.adventure:
-                prompt = self.prompt_adventure + ' <lora:Details:0.85> <lora:Fast:0.69> '
+                prompt = self.prompt_adventure + ', full-body, composed background, extremely detailed <lora:Details:0.85> <lora:Fast:0.69>'
             else:
-                prompt = self.prompt + ' <lora:Details:0.85> <lora:Fast:0.69> '
+                prompt = self.prompt + ', full-body, composed background, hyperrealistic, extremely detailed, bokeh, sharp focus, photorealistic <lora:Details:0.85> <lora:Fast:0.69>'
 
             queue_length = await self.get_image_variation(ctx, prompt)
             if queue_length == None:
@@ -268,6 +284,10 @@ class Minigame:
     async def give_up(self, ctx: discord.ApplicationContext | discord.Interaction):
         loop = asyncio.get_running_loop()
         user = utility.get_user(ctx)
+
+        # update leaderboard
+        username = self.host.name
+        self.update_leaderboard(username, give_up=True)
 
         if self.running == False:
             content = f'<@{user.id}> This game is over. The answer was ``{self.prompt}``.\n'
@@ -308,33 +328,33 @@ class Minigame:
                 break
 
         if self.adventure == False or self.images_base64:
-            guidance_scale = 2.7
+            guidance_scale = 1.5
             init_url = 'dummy' # minigame only uses cached images
         else:
-            guidance_scale = 2.7 # start with a more random image
+            guidance_scale = 1.5
             init_url = None
 
         # randomize sampler
-        steps = 12
-        sampler = "LCM"
+        steps = 8
+        sampler = "Euler a"
 
-        # insert negative prompt to reduce chance of AI from getting stuck drawing text
-        negative = 'BadHands, (NSFW, nude, naked), bad proportions, poorly drawn lines, worst quality, low quality, normal quality, lowres, signature, watermark, username, cropped'
+        # insert negative prompt
+        negative = 'BadHands, (empty background), NSFW, nude, naked, bad proportions, elongated neck, undetailed, poorly drawn lines, illustration, 3d render, painting, unrealistic skin, ugly teeth, ugly pupil, worst quality, low quality, normal quality, lowres, signature, watermark, username, cropped'
 
         # generate text output
         words = self.prompt.split(' ')
-        message = f'``/minigame'
+        message = f'`/minigame'
 
         if model_name != 'Default':
             message += f' checkpoint:{model_name}'
 
-        seed = random.randint(0, 0xFFFFFFFFFF)
-        message += f' adventure:{self.adventure} batch:{self.batch} seed:{seed} ``\n'
+        seed = random.randint(0, 0xFFFFFFFF)
+        message += f' adventure:{self.adventure} seed:{seed}`\n'
 
         if len(words) > 1:
             message += f'``({len(words)} words'
         else:
-            message += '``(1 word'
+            message += '`(1 word'
 
         for index, word in enumerate(words):
             if index == 0:
@@ -342,7 +362,7 @@ class Minigame:
             else:
                 message += f' + {len(word)} letters'
 
-        message += ')``'
+        message += ')`'
 
         random_message = await loop.run_in_executor(None, self.get_random_word, 'resources/minigame-messages.csv')
         if self.restarting:
@@ -411,7 +431,6 @@ class Minigame:
             'tiling': draw_object.tiling,
             'n_iter': draw_object.batch,
             'override_settings': {
-                # 'sd_model_checkpoint': draw_object.data_model
                 'CLIP_stop_at_last_layers': draw_object.clip_skip
             }
         }
@@ -426,41 +445,29 @@ class Minigame:
 
         draw_object.payload = payload
 
-        #increment number of images generated
+        # increment number of images generated
         settings.increment_stats(self.batch)
 
         priority = int(settings.read(self.guild)['priority']) + 1
         return queuehandler.dream_queue.process_dream(draw_object, priority)
 
-        # while game_iteration == self.game_iteration:
-        #     await asyncio.sleep(0.1)
-
     def get_random_prompt(self):
         return self.get_random_word('resources/minigame-words.csv')
 
     def get_random_word(self, filepath: str):
-        file_stats = os.stat(filepath)
-        file = open(filepath)
-        offset = random.randrange(file_stats.st_size)
-        file.seek(offset)
-        file.readline()
-        random_line = file.readline()
-
-        # extra to handle last/first line edge cases
-        if len(random_line) == 0: # we have hit the end
-            file.seek(0)
-            random_line = file.readline() # so we'll grab the first line instead
-
-        random_line.replace('\n', '')
-        return random_line.strip()
+        with open(filepath, 'r', encoding='utf-8') as file:
+            words = [line.strip() for line in file if line.strip()]
+        return random.choice(words)
 
     def dream(self, queue_object: utility.DrawObject, web_ui: utility.WebUI, queue_continue: threading.Event):
         user = utility.get_user(queue_object.ctx)
 
         try:
+            start_time = time.time()
+
             if self.running == False:
                 # minigame has ended, avoid posting another window
-                self.view = self.view_last # allow user to use previous view
+                self.view = self.view_last
                 queuehandler.upload_queue.process_upload(utility.UploadObject(queue_object=queue_object,
                     content=f'<@{user.id}> The game is over. The queue for new minigame images have been cancelled.', ephemeral=True, delete_after=30
                 ))
@@ -540,7 +547,7 @@ class Minigame:
 
             if self.running == False:
                 # minigame has ended, avoid posting another window
-                self.view = self.view_last # allow user to use previous view
+                self.view = self.view_last
                 queuehandler.upload_queue.process_upload(utility.UploadObject(queue_object=queue_object,
                     content=f'<@{user.id}> The game is over. The queue for new minigame images have been cancelled.', ephemeral=True, delete_after=30
                 ))
@@ -580,6 +587,14 @@ class Minigame:
                         else:
                             print(f'Received image: {int(time.time())}-{queue_object.seed}-{file_name[0:120]}-{i}.png')
 
+                    # end of processing time, edit message
+                    end_time = time.time()
+                    generation_time = end_time - start_time
+                    command_end_index = queue_object.message.find('`', queue_object.message.find('/minigame')) + 1
+                    queue_object.message = (queue_object.message[:command_end_index] +
+                                            f' took me `{generation_time:.2f}` seconds!' +
+                                            queue_object.message[command_end_index:])
+        
                     # post to discord
                     with contextlib.ExitStack() as stack:
                         buffer_handles = [stack.enter_context(io.BytesIO()) for _ in pil_images]
@@ -596,7 +611,7 @@ class Minigame:
                         self.image_count += queue_object.batch
 
                 except Exception as e:
-                    self.view = self.view_last # allow user to use previous view
+                    self.view = self.view_last
                     content = f'<@{user.id}> ``{queue_object.message}``\nSomething went wrong.\n{e}'
                     print(content + f'\n{traceback.print_exc()}')
                     queuehandler.upload_queue.process_upload(utility.UploadObject(queue_object=queue_object, content=content, delete_after=30))
@@ -611,7 +626,7 @@ class Minigame:
             return
 
         except Exception as e:
-            self.view = self.view_last # allow user to use previous view
+            self.view = self.view_last
             content = f'<@{user.id}> ``{queue_object.message}``\nSomething went wrong.\n{e}'
             print(content + f'\n{traceback.print_exc()}')
             queuehandler.upload_queue.process_upload(utility.UploadObject(queue_object=queue_object, content=content, delete_after=30))
@@ -641,18 +656,38 @@ class MinigameCog(commands.Cog, description='Guess the prompt from the picture m
                 reader = csv.reader(file)
                 leaderboard_data = sorted(list(reader), key=lambda x: int(x[1]), reverse=True)
 
-            leaderboard_message = "🏆 **Minigame Leaderboard** 🏆\n"
-            leaderboard_message += "```\n"
-            leaderboard_message += "{:<4} {:<20} {:<10} {:<15} {:<10}\n".format("#", "Username", "Wins", "Commands Used", "Give Up (Looser!)")
+            # Créer un embed pour le leaderboard
+            embed = discord.Embed(title="🏆 Minigame Leaderboard 🏆", color=0x00ff00)
+
+            # Ajout des données du leaderboard dans l'embed
             for index, row in enumerate(leaderboard_data, start=1):
-                leaderboard_message += "{:<4} {:<20} {:<10} {:<15} {:<10}\n".format(index, row[0], row[1], row[2], row[3])
-            leaderboard_message += "```"
-            
-            await ctx.respond(leaderboard_message)
+                embed.add_field(name=f"#{index} {row[0]}", value=f"Wins: {row[1]} | Commands Used: {row[2]} | Give Up: {row[3]}", inline=False)
+
+            view = LeaderboardView()
+            await ctx.respond(embed=embed, view=view)
         except Exception as e:
             print(f"Error in leaderboard_handler: {e}")
             await ctx.respond("An error occurred while retrieving the leaderboard.")
 
+    @commands.slash_command(name='submission', description='Submit a prompt idea for the game. Limited to 3 words max.')
+    @option('prompt', str, description='Your word idea for the game.', required=True)
+    async def submission_handler(self, ctx: discord.ApplicationContext, prompt: str):
+        # sanity check
+        if not re.match(r'^[A-Za-z0-9 ]+$', prompt):
+            await ctx.respond("Your submission must contain only alphanumeric characters and spaces. It won't be saved.", ephemeral=True)
+            return
+
+        # limit to 3 words
+        if len(prompt.split()) > 3:
+            await ctx.respond("<@{ctx.author.id}> Your submission must not exceed 3 words. It won't be saved.", ephemeral=True)
+            return
+
+        # send submission to file
+        submissions_file = 'resources/submissions.txt'
+        with open(submissions_file, 'a', encoding='utf-8') as file:
+            file.write(f'{prompt}\n')
+
+        await ctx.respond(f"<@{ctx.author.id}> Your submission '{prompt}' has been received !\nThank you !", ephemeral=True)
 
     @commands.slash_command(name = 'minigame', description = 'Starts a minigame where you guess the prompt from a picture.')
     @option(
@@ -662,24 +697,16 @@ class MinigameCog(commands.Cog, description='Guess the prompt from the picture m
         required=False,
     )
     @option(
-        'checkpoint',
-        str,
-        description='Select the data model for image generation',
-        required=False,
-        autocomplete=settings.autocomplete_model,
-    )
-    @option(
         'adventure',
         bool,
-        description='Try to make the prompt look more interesting.',
+        description='Try to make the prompt look more interesting. This is the salty version of the game.',
         required=False,
     )
     async def draw_handler(self, ctx: discord.ApplicationContext, *,
                            prompt: Optional[str] = None,
-                           checkpoint: Optional[str] = None,
                            adventure: Optional[bool] = None):
         try:
-            model_name: str = checkpoint
+            model_name = None
 
             loop = asyncio.get_running_loop()
             host = utility.get_user(ctx)
@@ -689,7 +716,6 @@ class MinigameCog(commands.Cog, description='Guess the prompt from the picture m
             minigame.prompt = prompt
 
             if adventure != None: minigame.adventure = adventure
-            batch = 2
             if not model_name: model_name = settings.read(guild)['data_model']
 
             data_model: str = ''
@@ -732,11 +758,6 @@ class MinigameView(View):
             if not self.input_object:
                 loop.create_task(interaction.response.send_message('I may have been restarted. This interaction no longer works.\nPlease start a new minigame using the /minigame command.', ephemeral=True, delete_after=30))
                 return
-
-            # only allow interaction for the host
-            #if self.minigame.running and self.minigame.host.id != interaction.user.id:
-            #    loop.create_task(interaction.response.send_message(f'Only {self.minigame.host.name} may configure the minigame.', ephemeral=True, delete_after=30))
-            #    return
 
             # only allow interaction with the latest post
             if self.minigame.view != self:
@@ -821,8 +842,9 @@ class MinigameView(View):
 
     # guess prompt button
     @discord.ui.button(
-        label='Guess Prompt',
+        label='Guess the Prompt !',
         custom_id='minigame_guess-prompt',
+        style=discord.ButtonStyle.success,        
         emoji='⌨️',
         row=1)
     async def guess_prompt(self, button: discord.Button, interaction: discord.Interaction):
@@ -862,7 +884,7 @@ class MinigameEditModal(Modal):
         self.add_item(
             InputText(
                 label='Prompt. Leave empty for a random prompt.',
-                value=prompt,
+                value='',
                 style=discord.InputTextStyle.short,
                 required=False
             )
@@ -888,7 +910,7 @@ class MinigameEditModal(Modal):
                 self.minigame.reveal_prompt = True
             else:
                 self.minigame.reveal_prompt = True
-                prompt = None
+                #prompt = None
 
             # run stablecog dream using draw object
             await self.minigame.stop()
